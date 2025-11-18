@@ -31,11 +31,17 @@ SCOPE = [
 
 @st.cache_resource
 def get_worksheet():
+    # infos du compte de service
     info = dict(st.secrets["gcp_service_account"])
     creds = Credentials.from_service_account_info(info, scopes=SCOPE)
     client = gspread.authorize(creds)
-    sh = client.open_by_key(st.secrets["gsheet_id"])
+
+    # gsheet_id stocké dans la même section
+    gsheet_id = st.secrets["gcp_service_account"]["gsheet_id"]
+
+    sh = client.open_by_key(gshet_id)
     ws = sh.sheet1
+
     # S'assurer que l'en-tête existe
     header = ws.row_values(1)
     expected = [
@@ -46,6 +52,7 @@ def get_worksheet():
         ws.clear()
         ws.append_row(expected)
     return ws
+
 
 ws = get_worksheet()
 
