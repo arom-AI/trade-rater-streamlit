@@ -39,7 +39,7 @@ def get_worksheet():
     # gsheet_id stocké dans la même section
     gsheet_id = st.secrets["gcp_service_account"]["gsheet_id"]
 
-    sh = client.open_by_key(gshet_id)
+    sh = client.open_by_key(gsheet_id)
     ws = sh.sheet1
 
     # S'assurer que l'en-tête existe
