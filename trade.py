@@ -2,17 +2,117 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, date
 
+import gspread
+from google.oauth2.service_account import Credentials
+
 st.set_page_config(page_title="Trade Rater %", layout="centered")
 
-st.title("📊 Trade Rater — Score en %")
+# Petit polish visuel léger
+st.markdown("""
+<style>
+    .main {padding-top: 1.5rem;}
+    h1 {font-size: 2.3rem;}
+    .stButton>button {
+        border-radius: 0.5rem;
+        padding: 0.4rem 0.9rem;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-# --- Sidebar: mode ---
+st.title("📊 Trade Rater — Score en % (version biais Romu, Sheets)")
+
+# ──────────────────────────────
+# Connexion Google Sheets
+# ──────────────────────────────
+SCOPE = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
+@st.cache_resource
+def get_worksheet():
+    info = dict(st.secrets["gcp_service_account"])
+    creds = Credentials.from_service_account_info(info, scopes=SCOPE)
+    client = gspread.authorize(creds)
+    sh = client.open_by_key(st.secrets["gsheet_id"])
+    ws = sh.sheet1
+    # S'assurer que l'en-tête existe
+    header = ws.row_values(1)
+    expected = [
+        "datetime","date_trade","pair","direction","timeframe",
+        "session","rr","score_percent","commentaire","taken","result"
+    ]
+    if header != expected:
+        ws.clear()
+        ws.append_row(expected)
+    return ws
+
+ws = get_worksheet()
+
+def append_trade(row_dict: dict):
+    """Ajoute un trade en fin de feuille."""
+    row = [
+        row_dict.get("datetime", ""),
+        row_dict.get("date_trade", ""),
+        row_dict.get("pair", ""),
+        row_dict.get("direction", ""),
+        row_dict.get("timeframe", ""),
+        row_dict.get("session", ""),
+        row_dict.get("rr", ""),
+        row_dict.get("score_percent", ""),
+        row_dict.get("commentaire", ""),
+        row_dict.get("taken", ""),
+        row_dict.get("result", ""),
+    ]
+    ws.append_row(row)
+
+def load_all_trades() -> pd.DataFrame:
+    """Charge tous les trades depuis Sheets dans un DataFrame."""
+    values = ws.get_all_values()
+    if len(values) <= 1:
+        return pd.DataFrame(columns=[
+            "datetime","date_trade","pair","direction","timeframe",
+            "session","rr","score_percent","commentaire","taken","result","sheet_row"
+        ])
+    header = values[0]
+    rows = values[1:]
+    df = pd.DataFrame(rows, columns=header)
+    # Ajouter index de ligne réelle dans la feuille (1 = header)
+    df["sheet_row"] = df.index + 2
+
+    # Types
+    if "date_trade" in df.columns:
+        df["date_trade"] = pd.to_datetime(df["date_trade"], errors="coerce").dt.date
+    if "datetime" in df.columns:
+        df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
+    for col in ["rr", "score_percent"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    return df
+
+def update_taken_and_result(updates):
+    """
+    updates = list of dict: {"sheet_row": int, "taken": str, "result": str}
+    """
+    header = ws.row_values(1)
+    col_taken = header.index("taken") + 1
+    col_result = header.index("result") + 1
+    for u in updates:
+        r = int(u["sheet_row"])
+        if u.get("taken") is not None:
+            ws.update_cell(r, col_taken, u["taken"])
+        if u.get("result") is not None:
+            ws.update_cell(r, col_result, u["result"])
+
+# ──────────────────────────────
+# UI
+# ──────────────────────────────
+
 mode = st.sidebar.selectbox(
     "Mode",
     ["Nouveau trade", "Dashboard hebdo"]
 )
-
-LOG_FILE = "trades_log_percent.csv"
 
 # =========================================================
 # MODE 1 : NOUVEAU TRADE
@@ -249,33 +349,42 @@ if mode == "Nouveau trade":
 
     score += session_bonus
 
-    # --- F. Bonus ---
-    st.subheader("F. Bonus (banger mode)")
+    # --- F. Market structure HTF ---
+    st.subheader("F. Market structure HTF")
 
-    bonus_liquidity = st.slider("Liquidity grab / sweep propre", 0, 10, 0)
-    bonus_reaction = st.slider("Réaction propre sur la zone", 0, 10, 0)
-    bonus_multitf = st.slider("Confluence multi-timeframe (même idée visible H1/H4/Daily...)", 0, 10, 0)
-    bonus_execution = st.slider("Entrée / gestion parfaite", 0, 5, 0)
-
-    score += bonus_liquidity + bonus_reaction + bonus_multitf + bonus_execution
+    ms_htf = st.slider(
+        "La structure de marché HTF (H4/Daily/Weekly) est-elle propre et alignée avec ton trade ?",
+        0, 5, 0
+    )
+    score += ms_htf
+    if ms_htf > 0:
+        notes.append(f"Market structure HTF alignée (+{ms_htf})")
 
     # --- Résultat + AUTO-REFUS ---
     st.subheader("Résultat")
 
-    score_percent = score  # on interprète le score comme un pourcentage
+    score_percent = score
 
     st.metric("Qualité du setup", f"{score_percent:.1f} %")
 
-    if score_percent < 50:
-        st.error("❌ NO TRADE — Score < 50%. Le plan dit NON.")
+    if score_percent < 80:
+        st.error("❌ NO TRADE — Score < 80%. Le plan dit NON.")
     else:
-        st.success("✅ Trade potentiellement acceptable selon le plan.")
+        st.success("✅ Trade potentiellement acceptable selon le plan (≥ 80%).")
 
     st.write("Notes :")
     for n in notes:
         st.write("- " + n)
 
     commentaire = st.text_area("Commentaire perso (facultatif)")
+
+    # Choix par défaut : trade pris ? (tu peux modifier plus tard dans le dashboard)
+    taken_default = st.selectbox("As-tu pris ce trade ?", ["Non", "Oui"], index=0)
+    result_default = st.selectbox(
+        "Résultat (tu pourras le corriger plus tard)",
+        ["Non pris", "Win", "Loss", "BE"],
+        index=0
+    )
 
     # --- Sauvegarde ---
     if st.button("Enregistrer le trade"):
@@ -288,17 +397,12 @@ if mode == "Nouveau trade":
             "session": session,
             "rr": rr,
             "score_percent": score_percent,
-            "commentaire": commentaire
+            "commentaire": commentaire,
+            "taken": taken_default,
+            "result": result_default,
         }
-
-        try:
-            df = pd.read_csv(LOG_FILE)
-            df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-        except FileNotFoundError:
-            df = pd.DataFrame([row])
-
-        df.to_csv(LOG_FILE, index=False)
-        st.success("✅ Trade enregistré dans trades_log_percent.csv")
+        append_trade(row)
+        st.success("✅ Trade enregistré dans Google Sheets")
 
 # =========================================================
 # MODE 2 : DASHBOARD HEBDO
@@ -306,14 +410,10 @@ if mode == "Nouveau trade":
 else:
     st.subheader("📅 Dashboard hebdo — scores & ranking")
 
-    try:
-        df = pd.read_csv(LOG_FILE)
-    except FileNotFoundError:
-        st.warning("Aucun fichier de trades trouvé.")
+    df = load_all_trades()
+    if df.empty:
+        st.warning("Aucun trade enregistré pour l’instant.")
         st.stop()
-
-    df["date_trade"] = pd.to_datetime(df["date_trade"]).dt.date
-    df["datetime"] = pd.to_datetime(df["datetime"])
 
     iso_calendar = pd.to_datetime(df["date_trade"]).map(lambda d: d.isocalendar())
     df["iso_year"] = [x.year for x in iso_calendar]
@@ -356,18 +456,48 @@ else:
     st.write(f"Trades pour la semaine {sel_year}-W{sel_week} : {len(df_week)} trade(s).")
 
     # Ranking
-    st.subheader("🏆 Ranking des trades")
+    st.subheader("🏆 Ranking des trades (par score)")
 
     df_sorted = df_week.sort_values("score_percent", ascending=False).reset_index(drop=True)
 
+    updates = []
+
     for idx, row in df_sorted.iterrows():
-        st.write(
-            f"**{idx+1}.** {row['date_trade']} — {row['pair']} {row['direction']} "
-            f"({row['timeframe']} / {row['session']}) → **{row['score_percent']:.1f}%**"
-        )
+        st.markdown(f"### {idx+1}. {row['date_trade']} — {row['pair']} {row['direction']} "
+                    f"({row['timeframe']} / {row['session']}) → **{row['score_percent']:.1f}%**")
+
+        st.write(f"Pris : {row.get('taken', '')} | Résultat : {row.get('result', '')}")
+
+        # Widgets d’édition
+        col1, col2 = st.columns(2)
+        with col1:
+            taken_new = st.selectbox(
+                f"Pris ? (trade {idx+1})",
+                ["", "Oui", "Non"],
+                index=["", "Oui", "Non"].index(row["taken"]) if row["taken"] in ["Oui", "Non"] else 0,
+                key=f"taken_{row['sheet_row']}"
+            )
+        with col2:
+            result_new = st.selectbox(
+                f"Résultat (trade {idx+1})",
+                ["", "Win", "Loss", "BE", "Non pris"],
+                index=["", "Win", "Loss", "BE", "Non pris"].index(row["result"]) if row["result"] in ["Win", "Loss", "BE", "Non pris"] else 0,
+                key=f"result_{row['sheet_row']}"
+            )
+
+        updates.append({
+            "sheet_row": row["sheet_row"],
+            "taken": taken_new if taken_new != "" else None,
+            "result": result_new if result_new != "" else None,
+        })
+
         if isinstance(row.get("commentaire", ""), str) and row["commentaire"].strip():
             st.write(f"💬 _{row['commentaire']}_")
         st.write("---")
+
+    if st.button("💾 Enregistrer les modifications (pris / résultat)"):
+        update_taken_and_result(updates)
+        st.success("✅ Modifications enregistrées dans Google Sheets (recharge la page pour voir à jour).")
 
     # Histogramme
     st.subheader("📊 Distribution des scores")
