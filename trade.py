@@ -422,6 +422,7 @@ else:
         st.warning("Aucun trade enregistré pour l’instant.")
         st.stop()
 
+    # ISO semaine
     iso_calendar = pd.to_datetime(df["date_trade"]).map(lambda d: d.isocalendar())
     df["iso_year"] = [x.year for x in iso_calendar]
     df["iso_week"] = [x.week for x in iso_calendar]
@@ -462,7 +463,9 @@ else:
 
     st.write(f"Trades pour la semaine {sel_year}-W{sel_week} : {len(df_week)} trade(s).")
 
-    # Ranking
+    # ------------------------------------------------------------------
+    # 1) Ranking détaillé + édition pris / résultat
+    # ------------------------------------------------------------------
     st.subheader("🏆 Ranking des trades (par score)")
 
     df_sorted = df_week.sort_values("score_percent", ascending=False).reset_index(drop=True)
@@ -470,12 +473,13 @@ else:
     updates = []
 
     for idx, row in df_sorted.iterrows():
-        st.markdown(f"### {idx+1}. {row['date_trade']} — {row['pair']} {row['direction']} "
-                    f"({row['timeframe']} / {row['session']}) → **{row['score_percent']:.1f}%**")
+        st.markdown(
+            f"### {idx+1}. {row['date_trade']} — {row['pair']} {row['direction']} "
+            f"({row['timeframe']} / {row['session']}) → **{row['score_percent']:.1f}%**"
+        )
 
         st.write(f"Pris : {row.get('taken', '')} | Résultat : {row.get('result', '')}")
 
-        # Widgets d’édition
         col1, col2 = st.columns(2)
         with col1:
             taken_new = st.selectbox(
@@ -506,7 +510,9 @@ else:
         update_taken_and_result(updates)
         st.success("✅ Modifications enregistrées dans Google Sheets (recharge la page pour voir à jour).")
 
-    # Histogramme
+    # ------------------------------------------------------------------
+    # 2) Histogramme des scores
+    # ------------------------------------------------------------------
     st.subheader("📊 Distribution des scores")
 
     chart_df = df_sorted[["datetime", "score_percent"]].copy()
@@ -514,8 +520,10 @@ else:
 
     st.bar_chart(chart_df, y="score_percent")
 
-    # Stats
-    st.subheader("📈 Stats rapides")
+    # ------------------------------------------------------------------
+    # 3) Stats globales semaine
+    # ------------------------------------------------------------------
+    st.subheader("📈 Stats rapides (tous les trades de la semaine)")
 
     moyenne = df_week["score_percent"].mean()
     max_score = df_week["score_percent"].max()
@@ -525,3 +533,73 @@ else:
     col_a.metric("Score moyen", f"{moyenne:.1f} %")
     col_b.metric("Meilleur score", f"{max_score:.1f} %")
     col_c.metric("Pire score", f"{min_score:.1f} %")
+
+    # ------------------------------------------------------------------
+    # 4) Perf sur les trades PRIS uniquement
+    # ------------------------------------------------------------------
+    st.subheader("🎯 Performance sur les trades PRIS uniquement")
+
+    df_taken = df_week[df_week["taken"] == "Oui"].copy()
+    if df_taken.empty:
+        st.info("Tu n'as marqué aucun trade comme 'Pris' pour cette semaine.")
+        st.stop()
+
+    # On ne compte que Win / Loss / BE dans le calcul winrate
+    mask_eval = df_taken["result"].isin(["Win", "Loss", "BE"])
+    df_eval = df_taken[mask_eval].copy()
+
+    if df_eval.empty:
+        st.info("Aucun résultat (Win/Loss/BE) renseigné pour les trades pris.")
+    else:
+        wins = (df_eval["result"] == "Win").sum()
+        losses = (df_eval["result"] == "Loss").sum()
+        be = (df_eval["result"] == "BE").sum()
+        total = wins + losses + be
+        winrate = (wins / total * 100) if total > 0 else 0.0
+
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Trades pris", len(df_taken))
+        col2.metric("Win", wins)
+        col3.metric("Loss", losses)
+        col4.metric("Winrate (Win / (W+L+BE))", f"{winrate:.1f} %")
+
+        # --------------------------------------------------------------
+        # 5) Performance par paire
+        # --------------------------------------------------------------
+        st.subheader("📌 Performance par paire (trades pris)")
+
+        def agg_perf(group):
+            wins_g = (group["result"] == "Win").sum()
+            losses_g = (group["result"] == "Loss").sum()
+            be_g = (group["result"] == "BE").sum()
+            total_g = wins_g + losses_g + be_g
+            winrate_g = (wins_g / total_g * 100) if total_g > 0 else 0.0
+            return pd.Series({
+                "Trades": len(group),
+                "Win": wins_g,
+                "Loss": losses_g,
+                "BE": be_g,
+                "Winrate %": round(winrate_g, 1),
+                "Score moyen": round(group["score_percent"].mean(), 1),
+                "RR moyen": round(group["rr"].mean(), 2) if "rr" in group.columns else None,
+            })
+
+        perf_pair = df_eval.groupby("pair").apply(agg_perf).reset_index().sort_values("Winrate %", ascending=False)
+        st.dataframe(perf_pair, use_container_width=True)
+
+        # --------------------------------------------------------------
+        # 6) Performance Buy vs Sell
+        # --------------------------------------------------------------
+        st.subheader("🧭 Performance Buy vs Sell (trades pris)")
+
+        perf_dir = df_eval.groupby("direction").apply(agg_perf).reset_index().sort_values("Winrate %", ascending=False)
+        st.dataframe(perf_dir, use_container_width=True)
+
+        # --------------------------------------------------------------
+        # 7) Bonus : performance par session
+        # --------------------------------------------------------------
+        st.subheader("🕒 Performance par session (trades pris)")
+
+        perf_sess = df_eval.groupby("session").apply(agg_perf).reset_index().sort_values("Winrate %", ascending=False)
+        st.dataframe(perf_sess, use_container_width=True)
+
