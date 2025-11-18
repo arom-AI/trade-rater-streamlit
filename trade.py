@@ -19,7 +19,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📊 Trade Rater — Score en % (version biais Romu, Sheets)")
+st.title("📊 Trade Rater — Score en % ")
 
 # ──────────────────────────────
 # Connexion Google Sheets
